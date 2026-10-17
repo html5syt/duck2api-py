@@ -1,0 +1,21 @@
+﻿services:
+  duck2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/html5syt/duck2api-py:latest
+    container_name: duck2api-py
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - BROWSER_HEADLESS=true
+      - PAGE_POOL_SIZE=3
+      # 可选配置项：
+      # - AUTHORIZATION=Bearer your_api_key_here
+      # - PROXY_URL=http://your-proxy-host:port
+      # - PREFIX=/api
+    # 增加共享内存大小，防止 Chromium 在容器内崩溃
+    shm_size: "2gb"

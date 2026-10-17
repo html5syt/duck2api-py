@@ -1,0 +1,16 @@
+﻿.git
+.gitignore
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+tests/
+test-results/
+playwright-report/
+.env*
+proxies.txt
+*.md
+!README.md

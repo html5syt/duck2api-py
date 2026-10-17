@@ -4,7 +4,7 @@
 """
 
 import json
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from duck2api.core.browser import browser_manager
 from duck2api.core.models import ModelRegistry
 from duck2api.schemas.duckgo import (
@@ -49,9 +49,15 @@ class ImageService:
         )
 
         payload = duck_req.model_dump(by_alias=True, exclude_none=True)
-        images_data, revised_prompt = await self._collect_images_from_stream(payload)
+        images_data, revised_prompt, upstream_error = await self._collect_images_from_stream(payload)
 
         if not images_data:
+            if upstream_error:
+                logger.error(f"Upstream returned error during image generation: {upstream_error}")
+                raise RuntimeError(
+                    f"Duck.ai upstream error: {upstream_error}. "
+                    "If running on a server or experiencing IP rate limits, please configure a clean proxy via PROXY_URL."
+                )
             logger.warning("No image data found in stream response")
             raise RuntimeError("No image was returned from upstream Duck.ai")
 
@@ -86,9 +92,14 @@ class ImageService:
         )
 
         payload = duck_req.model_dump(by_alias=True, exclude_none=True)
-        images_data, revised_prompt = await self._collect_images_from_stream(payload)
+        images_data, revised_prompt, upstream_error = await self._collect_images_from_stream(payload)
 
         if not images_data:
+            if upstream_error:
+                raise RuntimeError(
+                    f"Duck.ai upstream error: {upstream_error}. "
+                    "If running on a server or experiencing IP rate limits, please configure a clean proxy via PROXY_URL."
+                )
             raise RuntimeError("No edited image was returned from upstream Duck.ai")
 
         return ImageResponse(
@@ -96,13 +107,22 @@ class ImageService:
             data=images_data,
         )
 
-    async def _collect_images_from_stream(self, payload: dict) -> Tuple[List[ImageData], str]:
-        """从上游 SSE 响应中完整重组分块并提取图片 Base64 数据与提示词文本。"""
+    async def _collect_images_from_stream(self, payload: dict) -> Tuple[List[ImageData], str, Optional[str]]:
+        """从上游 SSE 响应中完整重组分块并提取图片 Base64 数据、提示词文本与可能的错误信息。"""
         raw_candidates: List[str] = []
         text_builder: List[str] = []
         buffer = ""
+        last_upstream_error: Optional[str] = None
 
         async for chunk_str in self.browser.chat_stream(payload):
+            # 捕获上游直接返回的错误信息
+            if "__duck_error__" in chunk_str:
+                try:
+                    err_obj = json.loads(chunk_str)
+                    last_upstream_error = err_obj.get("body") or f"HTTP {err_obj.get('status')}"
+                except Exception:
+                    pass
+
             buffer += chunk_str
             # 按换行严格切分完整行，处理跨 TCP 分包截断的超长 Base64 JSON 串
             while "\n" in buffer:
@@ -119,6 +139,9 @@ class ImageService:
                 except Exception:
                     # 分块尚未完全闭合或非 JSON，保留继续缓冲
                     continue
+
+                if event.get("action") == "error":
+                    last_upstream_error = event.get("type") or json.dumps(event)
 
                 msg = event.get("message")
                 if msg:
@@ -169,7 +192,6 @@ class ImageService:
 
         images: List[ImageData] = []
         if clean_images:
-            # 当存在多张图片或由粗到精的预览图时，保留尺寸最大（最清晰）的最终生成结果
             best_img = max(clean_images, key=len)
             images.append(ImageData(b64_json=best_img))
 
@@ -177,7 +199,7 @@ class ImageService:
         for img in images:
             img.revised_prompt = revised_text
 
-        return images, revised_text
+        return images, revised_text, last_upstream_error
 
 
 image_service = ImageService()

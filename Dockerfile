@@ -1,4 +1,4 @@
-﻿FROM python:3.12-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -9,10 +9,12 @@ ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     BROWSER_HEADLESS=true
 
-# 安装基础网络及证书工具
+# 安装基础网络、证书工具与常用字体库（保证无头浏览器在 Linux 环境下的 DOM 字体渲染度量与真实桌面一致）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    fonts-liberation \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖描述文件

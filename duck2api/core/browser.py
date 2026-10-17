@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -88,6 +89,42 @@ class BrowserManager:
             }
             self._context = await self._browser.new_context(**context_kwargs)
 
+            # 注入全量防检测 Stealth 脚本，解决 Linux / Docker 无头环境下的指纹特征暴露
+            stealth_js = """
+            // 1. 隐藏 webdriver
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+                configurable: true
+            });
+
+            // 2. 统一平台标识为 Win32 (与默认 Windows User-Agent 对齐，防止跨平台指纹冲突)
+            Object.defineProperty(navigator, 'platform', {
+                get: () => 'Win32',
+                configurable: true
+            });
+
+            // 3. 补全 chrome 运行时特征
+            if (!window.chrome) {
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
+                };
+            }
+
+            // 4. 补全常用插件与语言列表
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5],
+                configurable: true
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+                configurable: true
+            });
+            """
+            await self._context.add_init_script(stealth_js)
+
             # 预热并填充页面池
             pool_size = max(1, settings.page_pool_size)
             logger.info(f"Pre-warming page pool (target size: {pool_size})...")
@@ -105,11 +142,11 @@ class BrowserManager:
         page = await self._context.new_page()
         page.set_default_timeout(settings.browser_timeout_ms)
 
-        # 屏蔽无关静态大资源（视频、字体、大图），加速响应与减少内存
+        # 仅拦截视频和大图，保留字体文件以确保 JSA 排版与文本测量检测完全通过
         async def route_filter(route):
             req = route.request
             resource_type = req.resource_type
-            if resource_type in ("image", "media", "font") and "duckchat" not in req.url:
+            if resource_type in ("image", "media") and "duckchat" not in req.url:
                 await route.abort()
             else:
                 await route.continue_()
@@ -134,7 +171,6 @@ class BrowserManager:
         page = await self._pool.get()
         is_healthy = True
         try:
-            # 简单健康检测
             if page.is_closed():
                 is_healthy = False
             yield page
@@ -155,7 +191,6 @@ class BrowserManager:
                 if page in self._all_pages:
                     self._all_pages.remove(page)
 
-                # 补充新的健康页面
                 try:
                     new_page = await self._create_ready_page()
                     self._all_pages.append(new_page)
@@ -262,7 +297,31 @@ class BrowserManager:
             """
 
             for attempt in range(max_retries + 1):
-                token = await self.fetch_vqd_token(page)
+                # 每次重试前彻底清空队列中的残留数据，防止历史分块或 EOF 毒化新请求
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+
+                if attempt > 0:
+                    # 遭遇上游风控或限制后进行退避延迟并重新刷新页面会话与 Cookies
+                    logger.info(f"Refreshing page session for retry attempt {attempt}/{max_retries}...")
+                    await asyncio.sleep(1.0 * attempt)
+                    try:
+                        await page.goto(settings.duck_base_url, wait_until="commit", timeout=settings.browser_timeout_ms)
+                        await page.wait_for_load_state("domcontentloaded")
+                    except Exception as e:
+                        logger.warning(f"Page reload warning on retry: {e}")
+
+                try:
+                    token = await self.fetch_vqd_token(page)
+                except Exception as e:
+                    if attempt < max_retries:
+                        logger.warning(f"Failed to fetch VQD on attempt {attempt}: {e}, retrying...")
+                        continue
+                    raise
+
                 journey_id = SignalGenerator.generate_journey_id()
                 fe_signals = SignalGenerator.create_fe_signals()
 
@@ -274,11 +333,10 @@ class BrowserManager:
                     "callbackName": callback_name,
                 }
 
-                # 在后台异步启动页面流式请求
                 stream_task = asyncio.create_task(page.evaluate(stream_worker_js, worker_params))
 
                 is_retryable_error = False
-                error_info = None
+                error_chunk_to_yield = None
 
                 while True:
                     chunk = await queue.get()
@@ -287,7 +345,6 @@ class BrowserManager:
 
                     # 探测错误分块
                     if "__duck_error__" in chunk:
-                        import json
                         try:
                             err_data = json.loads(chunk)
                             status = err_data.get("status")
@@ -295,7 +352,7 @@ class BrowserManager:
                                 logger.warning(f"Upstream returned {status}, retrying ({attempt + 1}/{max_retries})...")
                                 is_retryable_error = True
                                 break
-                            error_info = err_data
+                            error_chunk_to_yield = chunk
                         except Exception:
                             pass
 
@@ -304,8 +361,8 @@ class BrowserManager:
                 await stream_task
 
                 if not is_retryable_error:
-                    if error_info:
-                        logger.error(f"Upstream final error: {error_info}")
+                    if error_chunk_to_yield:
+                        logger.error(f"Upstream final error chunk: {error_chunk_to_yield}")
                     break
 
     async def close(self) -> None:

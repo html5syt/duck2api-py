@@ -1,4 +1,4 @@
-﻿services:
+services:
   duck2api:
     build:
       context: .
@@ -13,9 +13,12 @@
       - HOST=0.0.0.0
       - BROWSER_HEADLESS=true
       - PAGE_POOL_SIZE=3
-      # 可选配置项：
+      # 若在局域网服务器部署且宿主机运行有代理客户端（如 Clash 7890 端口），可取消下方注释连接宿主机代理：
+      # - PROXY_URL=http://host.docker.internal:7890
       # - AUTHORIZATION=Bearer your_api_key_here
-      # - PROXY_URL=http://your-proxy-host:port
       # - PREFIX=/api
+    # 允许容器内通过 host.docker.internal 访问宿主机网络服务（如宿主机上的代理客户端）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # 增加共享内存大小，防止 Chromium 在容器内崩溃
     shm_size: "2gb"

@@ -1,10 +1,10 @@
-﻿"""图像生成与编辑服务模块。
+"""图像生成与编辑服务模块。
 
 通过 DuckDuckGo 的 GenerateImage 工具调用实现 OpenAI 兼容的文生图与图生图。
 """
 
 import json
-from typing import List, Optional
+from typing import List, Tuple
 from duck2api.core.browser import browser_manager
 from duck2api.core.models import ModelRegistry
 from duck2api.schemas.duckgo import (
@@ -52,7 +52,6 @@ class ImageService:
         images_data, revised_prompt = await self._collect_images_from_stream(payload)
 
         if not images_data:
-            # 若未直接产生图像工具结果，使用兜底提示
             logger.warning("No image data found in stream response")
             raise RuntimeError("No image was returned from upstream Duck.ai")
 
@@ -97,44 +96,82 @@ class ImageService:
             data=images_data,
         )
 
-    async def _collect_images_from_stream(self, payload: dict) -> tuple[List[ImageData], str]:
-        """从上游 SSE 响应中提取图片 Base64 数据与提示词文本。"""
-        images: List[ImageData] = []
+    async def _collect_images_from_stream(self, payload: dict) -> Tuple[List[ImageData], str]:
+        """从上游 SSE 响应中完整重组分块并提取图片 Base64 数据与提示词文本。"""
+        raw_candidates: List[str] = []
         text_builder: List[str] = []
+        buffer = ""
 
         async for chunk_str in self.browser.chat_stream(payload):
-            lines = chunk_str.split("\n")
-            for line in lines:
+            buffer += chunk_str
+            # 按换行严格切分完整行，处理跨 TCP 分包截断的超长 Base64 JSON 串
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
                 line = line.strip()
-                if not line.startswith("data:") or line == "data: [DONE]":
+                if not line or not line.startswith("data:"):
                     continue
+                if line == "data: [DONE]":
+                    break
 
-                event_json = line[5:].strip()
+                raw_json = line[5:].strip()
                 try:
-                    data = json.loads(event_json)
+                    event = json.loads(raw_json)
                 except Exception:
+                    # 分块尚未完全闭合或非 JSON，保留继续缓冲
                     continue
 
-                msg = data.get("message")
+                msg = event.get("message")
                 if msg:
                     text_builder.append(msg)
 
-                # 格式 1: parts 数组中的 generated-image
-                parts = data.get("parts", [])
-                for p in parts:
-                    if isinstance(p, dict) and p.get("type") in ("generated-image", "image"):
-                        b64 = p.get("result")
-                        if not b64 and isinstance(p.get("data"), dict):
-                            b64 = p["data"].get("b64Image")
-                        if b64:
-                            images.append(ImageData(b64_json=b64))
+                # 1. 提取 event.data 中的图片数据
+                data_field = event.get("data")
+                if isinstance(data_field, dict):
+                    for key in ("b64Image", "image", "result"):
+                        val = data_field.get(key)
+                        if val and isinstance(val, str) and len(val) > 100:
+                            raw_candidates.append(val)
+                elif isinstance(data_field, str) and "b64Image" in data_field:
+                    try:
+                        inner_data = json.loads(data_field)
+                        if isinstance(inner_data, dict):
+                            b64 = inner_data.get("b64Image")
+                            if b64 and len(b64) > 100:
+                                raw_candidates.append(b64)
+                    except Exception:
+                        pass
 
-                # 格式 2: data 字段包含 b64Image
-                raw_data = data.get("data")
-                if isinstance(raw_data, dict):
-                    b64 = raw_data.get("b64Image")
-                    if b64:
-                        images.append(ImageData(b64_json=b64))
+                # 2. 提取 event.parts 数组中的图片数据
+                parts = event.get("parts", [])
+                if isinstance(parts, list):
+                    for p in parts:
+                        if isinstance(p, dict):
+                            res = p.get("result")
+                            if res and len(res) > 100:
+                                raw_candidates.append(res)
+                            p_data = p.get("data")
+                            if isinstance(p_data, dict):
+                                b64 = p_data.get("b64Image")
+                                if b64 and len(b64) > 100:
+                                    raw_candidates.append(b64)
+
+                # 3. 提取 event.result 字段
+                result_field = event.get("result")
+                if result_field and isinstance(result_field, str) and len(result_field) > 200:
+                    raw_candidates.append(result_field)
+
+        # 清洗 Base64 格式（移除可能携带的 data:image/xxx;base64, 前缀）
+        clean_images: List[str] = []
+        for img_str in raw_candidates:
+            if "," in img_str and img_str.startswith("data:"):
+                img_str = img_str.split(",", 1)[1]
+            clean_images.append(img_str.strip())
+
+        images: List[ImageData] = []
+        if clean_images:
+            # 当存在多张图片或由粗到精的预览图时，保留尺寸最大（最清晰）的最终生成结果
+            best_img = max(clean_images, key=len)
+            images.append(ImageData(b64_json=best_img))
 
         revised_text = "".join(text_builder).strip()
         for img in images:

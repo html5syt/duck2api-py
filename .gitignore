@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -46,3 +46,6 @@ proxies.txt
 # OS
 .DS_Store
 Thumbs.db
+
+test_*.py
+raw_image_stream.txt

@@ -1,4 +1,4 @@
-﻿"""Playwright 原生浏览器管理器与页面池模块。
+"""Playwright 原生浏览器管理器与页面池模块。
 
 提供高性能的浏览器实例生命周期管理、页面复用池、自动重试与风控隔离机制。
 """
@@ -103,6 +103,7 @@ class BrowserManager:
         """创建并预加载 DuckDuckGo 站点的页面实例。"""
         assert self._context is not None
         page = await self._context.new_page()
+        page.set_default_timeout(settings.browser_timeout_ms)
 
         # 屏蔽无关静态大资源（视频、字体、大图），加速响应与减少内存
         async def route_filter(route):
@@ -246,6 +247,10 @@ class BrowserManager:
                         const chunkStr = decoder.decode(value, { stream: true });
                         if (chunkStr) {
                             await send(chunkStr);
+                            if (chunkStr.includes('[DONE]')) {
+                                try { reader.cancel(); } catch (e) {}
+                                break;
+                            }
                         }
                     }
                     await send("__STREAM_EOF__");

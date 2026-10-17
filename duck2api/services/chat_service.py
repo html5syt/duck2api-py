@@ -1,4 +1,4 @@
-﻿"""Chat Completions 业务服务模块。
+"""Chat Completions 业务服务模块。
 
 负责 OpenAI 协议到 DuckDuckGo 协议的双向转换、流式分块翻译及 Token/时间遥测。
 """
@@ -113,17 +113,18 @@ class ChatService:
         prompt_tokens = count_messages_tokens(req.messages)
         accumulated_text = ""
         is_first_chunk = True
+        stream_buffer = ""
 
         async for raw_chunk in self.browser.chat_stream(payload):
-            lines = raw_chunk.split("\n")
-            for line in lines:
+            stream_buffer += raw_chunk
+            while "\n" in stream_buffer:
+                line, stream_buffer = stream_buffer.split("\n", 1)
                 line = line.strip()
                 if not line or not line.startswith("data:"):
                     continue
 
                 event_data = line[5:].strip()
                 if event_data == "[DONE]":
-                    # 发送最终带 finish_reason 的分块
                     stop_chunk = ChatCompletionChunk(
                         id=chat_id,
                         created=created_ts,

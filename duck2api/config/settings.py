@@ -1,4 +1,4 @@
-﻿"""应用配置模块。
+"""应用配置模块。
 
 管理环境变量与全局运行时参数。
 """
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/133.0.0.0 Safari/537.36"
     )
-    browser_timeout_ms: int = 30000
+    browser_timeout_ms: int = 60000
     page_pool_size: int = 3
     page_idle_recycle_seconds: int = 600
 
